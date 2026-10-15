@@ -1,0 +1,57 @@
+name: Update public visit summary
+
+on:
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: public-visit-summary
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Verify report generator
+        run: node --test scripts/update-visit-summary.test.mjs
+      - name: Read aggregate GA4 report
+        env:
+          GA4_SERVICE_ACCOUNT_JSON: ${{ secrets.GA4_SERVICE_ACCOUNT_JSON }}
+          GA4_PROPERTY_ID: ${{ vars.GA4_PROPERTY_ID }}
+          GA4_START_DATE: ${{ vars.GA4_START_DATE }}
+          GA4_HOSTNAME: et2333.github.io
+          VISIT_SUMMARY_OUTPUT: ${{ runner.temp }}/analytics-summary.json
+        run: node scripts/update-visit-summary.mjs
+      - name: Publish summary to its own data branch
+        env:
+          SUMMARY_FILE: ${{ runner.temp }}/analytics-summary.json
+          DATA_DIR: ${{ runner.temp }}/visit-summary-branch
+        shell: bash
+        run: |
+          mkdir -p "$DATA_DIR"
+          git -C "$DATA_DIR" init --initial-branch=public-stats
+          git -C "$DATA_DIR" config user.name "github-actions[bot]"
+          git -C "$DATA_DIR" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$DATA_DIR" remote add origin "$(git remote get-url origin)"
+          # Reuse checkout's ephemeral authentication without persisting a secret file.
+          AUTH_KEY="http.https://github.com/.extraheader"
+          git -C "$DATA_DIR" config "$AUTH_KEY" "$(git config --get "$AUTH_KEY")"
+          if git ls-remote --exit-code --heads origin public-stats >/dev/null 2>&1; then
+            git -C "$DATA_DIR" fetch --depth=1 origin public-stats
+            git -C "$DATA_DIR" checkout -B public-stats FETCH_HEAD
+          fi
+          cp "$SUMMARY_FILE" "$DATA_DIR/analytics-summary.json"
+          git -C "$DATA_DIR" add analytics-summary.json
+          if ! git -C "$DATA_DIR" diff --cached --quiet; then
+            git -C "$DATA_DIR" commit -m "Update public visit totals"
+            git -C "$DATA_DIR" push origin HEAD:refs/heads/public-stats
+          fi
